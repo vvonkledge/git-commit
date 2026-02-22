@@ -18,6 +18,12 @@ hooks:
           async: false
           statusMessage: "Validating git command..."
           once: false
+        - type: command
+          command: "./hooks/block-sensitive-files.py"
+          timeout: 10
+          async: false
+          statusMessage: "Checking for sensitive files..."
+          once: false
 ---
 
 ## Purpose
