@@ -24,6 +24,24 @@ hooks:
           async: false
           statusMessage: "Checking for sensitive files..."
           once: false
+        - type: command
+          command: "./hooks/block-debug-artifacts.py"
+          timeout: 10
+          async: false
+          statusMessage: "Checking for debug artifacts..."
+          once: false
+        - type: command
+          command: "./hooks/block-large-files.py"
+          timeout: 10
+          async: false
+          statusMessage: "Checking for large files..."
+          once: false
+        - type: command
+          command: "./hooks/block-merge-conflicts.py"
+          timeout: 10
+          async: false
+          statusMessage: "Checking for merge conflict markers..."
+          once: false
 ---
 
 ## Purpose
