@@ -10,11 +10,15 @@ Run from repo root:  uv run hooks/test_hooks.py
 
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
 BLOCK_ADD_ALL = "hooks/block-git-add-all.py"
 BLOCK_SENSITIVE = "hooks/block-sensitive-files.py"
+BLOCK_DEBUG = "hooks/block-debug-artifacts.py"
+BLOCK_LARGE = "hooks/block-large-files.py"
+BLOCK_CONFLICTS = "hooks/block-merge-conflicts.py"
 
 
 def run_hook(script: str, command: str) -> dict | None:
@@ -126,6 +130,177 @@ class TestBlockSensitiveFiles:
 
     def test_empty_stdin_passes(self):
         assert run_hook_raw(BLOCK_SENSITIVE, "") is None
+
+
+# ── block-debug-artifacts ────────────────────────────────────────────
+
+
+class TestBlockDebugArtifacts:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git add src/app.py",
+            "git add README.md",
+        ],
+        ids=["python-file", "readme"],
+    )
+    def test_safe_files_pass(self, command):
+        assert run_hook(BLOCK_DEBUG, command) is None
+
+    @pytest.mark.parametrize(
+        ("command", "expected_pattern"),
+        [
+            ("git add app.log", "*.log"),
+            ("git add tmp_build", "tmp_*"),
+            ("git add cache.tmp", "*.tmp"),
+            ("git add debug_output", "debug_*"),
+        ],
+        ids=["log", "tmp-prefix", "tmp-suffix", "debug-prefix"],
+    )
+    def test_debug_artifact_blocked(self, command, expected_pattern):
+        result = run_hook(BLOCK_DEBUG, command)
+        assert result is not None
+        assert result["decision"] == "block"
+        assert expected_pattern in result["reason"]
+
+    def test_mixed_files_blocks_only_artifacts(self):
+        result = run_hook(BLOCK_DEBUG, "git add app.log src/app.py debug_output")
+        assert result["decision"] == "block"
+        assert "app.log" in result["reason"]
+        assert "debug_output" in result["reason"]
+        assert "src/app.py" not in result["reason"]
+
+    def test_non_git_add_passes(self):
+        assert run_hook(BLOCK_DEBUG, "git diff --stat") is None
+
+    def test_malformed_json_passes(self):
+        assert run_hook_raw(BLOCK_DEBUG, "not json") is None
+
+    def test_empty_stdin_passes(self):
+        assert run_hook_raw(BLOCK_DEBUG, "") is None
+
+
+# ── block-large-files ────────────────────────────────────────────────
+
+
+class TestBlockLargeFiles:
+    @pytest.fixture()
+    def files(self, tmp_path: Path) -> dict[str, Path]:
+        small = tmp_path / "small.bin"
+        small.write_bytes(b"\x00" * (1 * 1024 * 1024))  # 1 MB
+
+        large = tmp_path / "large.bin"
+        large.write_bytes(b"\x00" * (6 * 1024 * 1024))  # 6 MB
+
+        return {"small": small, "large": large}
+
+    def test_large_file_blocked(self, files):
+        result = run_hook(BLOCK_LARGE, f"git add {files['large']}")
+        assert result is not None
+        assert result["decision"] == "block"
+        assert "MB" in result["reason"]
+
+    def test_small_file_passes(self, files):
+        assert run_hook(BLOCK_LARGE, f"git add {files['small']}") is None
+
+    def test_mixed_files_blocks_only_large(self, files):
+        result = run_hook(BLOCK_LARGE, f"git add {files['small']} {files['large']}")
+        assert result is not None
+        assert result["decision"] == "block"
+        assert "large.bin" in result["reason"]
+        assert "small.bin" not in result["reason"]
+
+    def test_nonexistent_file_passes(self):
+        assert run_hook(BLOCK_LARGE, "git add /tmp/no-such-file-xyz") is None
+
+    def test_non_git_add_passes(self):
+        assert run_hook(BLOCK_LARGE, "git diff --stat") is None
+
+    def test_malformed_json_passes(self):
+        assert run_hook_raw(BLOCK_LARGE, "not json") is None
+
+    def test_empty_stdin_passes(self):
+        assert run_hook_raw(BLOCK_LARGE, "") is None
+
+
+# ── block-merge-conflicts ─────────────────────────────────────────────
+
+
+class TestBlockMergeConflicts:
+    @pytest.fixture()
+    def files(self, tmp_path: Path) -> dict[str, Path]:
+        conflicted = tmp_path / "conflicted.py"
+        conflicted.write_text(
+            "def greet():\n"
+            "<<<<<<< HEAD\n"
+            '    return "hello"\n'
+            "=======\n"
+            '    return "hi"\n'
+            ">>>>>>> feature\n",
+        )
+
+        clean = tmp_path / "clean.py"
+        clean.write_text("def greet():\n    return 'hello'\n")
+
+        partial = tmp_path / "partial.py"
+        partial.write_text("<<<<<<< HEAD\nsome code\n")
+
+        image = tmp_path / "image.bin"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\xff\xfe" * 100)
+
+        readme = tmp_path / "readme.md"
+        readme.write_text("Use ======= as a separator in tables.\n")
+
+        return {
+            "conflicted": conflicted,
+            "clean": clean,
+            "partial": partial,
+            "image": image,
+            "readme": readme,
+        }
+
+    def test_conflicted_file_blocked(self, files):
+        result = run_hook(BLOCK_CONFLICTS, f"git add {files['conflicted']}")
+        assert result is not None
+        assert result["decision"] == "block"
+        assert "conflicted.py" in result["reason"]
+
+    def test_clean_file_passes(self, files):
+        assert run_hook(BLOCK_CONFLICTS, f"git add {files['clean']}") is None
+
+    def test_partial_marker_blocked(self, files):
+        result = run_hook(BLOCK_CONFLICTS, f"git add {files['partial']}")
+        assert result is not None
+        assert result["decision"] == "block"
+
+    def test_binary_file_passes(self, files):
+        assert run_hook(BLOCK_CONFLICTS, f"git add {files['image']}") is None
+
+    def test_false_positive_passes(self, files):
+        assert run_hook(BLOCK_CONFLICTS, f"git add {files['readme']}") is None
+
+    def test_mixed_files_blocks_entirely(self, files):
+        result = run_hook(
+            BLOCK_CONFLICTS,
+            f"git add {files['conflicted']} {files['clean']}",
+        )
+        assert result is not None
+        assert result["decision"] == "block"
+        assert "conflicted.py" in result["reason"]
+        assert "clean.py" not in result["reason"]
+        assert "Do not stage any files" in result["reason"]
+
+    def test_nonexistent_file_passes(self):
+        assert run_hook(BLOCK_CONFLICTS, "git add /tmp/no-such-file-xyz") is None
+
+    def test_non_git_add_passes(self):
+        assert run_hook(BLOCK_CONFLICTS, "git diff --stat") is None
+
+    def test_malformed_json_passes(self):
+        assert run_hook_raw(BLOCK_CONFLICTS, "not json") is None
+
+    def test_empty_stdin_passes(self):
+        assert run_hook_raw(BLOCK_CONFLICTS, "") is None
 
 
 if __name__ == "__main__":
